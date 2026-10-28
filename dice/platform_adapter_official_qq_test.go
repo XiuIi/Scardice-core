@@ -1097,15 +1097,16 @@ func TestOfficialQQIdentityMigrationRetriesAfterFailure(t *testing.T) {
 		}
 	}
 
+	oldEndpoint := "OpenQQ:" + botID
 	endpoint := &EndPointInfo{
 		EndPointInfoBase: EndPointInfoBase{
 			ID:           "re-added-official-qq",
 			Platform:     "QQ",
 			ProtocolType: "official",
-			UserID:       formatDiceIDOfficialQQ(uin),
+			UserID:       oldEndpoint,
 		},
 	}
-	adapter := &PlatformAdapterOfficialQQ{EndPoint: endpoint, AppID: appID, UIN: uin}
+	adapter := &PlatformAdapterOfficialQQ{EndPoint: endpoint, AppID: appID}
 	endpoint.Adapter = adapter
 	d := &Dice{
 		BaseConfig: BaseConfig{DataDir: dataDir, Name: "default"},
@@ -1133,8 +1134,8 @@ func TestOfficialQQIdentityMigrationRetriesAfterFailure(t *testing.T) {
 	if !errors.As(migrationErr, &migrationFailure) {
 		t.Fatalf("migration error has wrong type: %T", migrationErr)
 	}
-	if adapter.UIN != uin || endpoint.UserID != formatDiceIDOfficialQQ(uin) {
-		t.Fatalf("resolved identity was discarded after migration failure: UIN=%q userID=%q", adapter.UIN, endpoint.UserID)
+	if adapter.UIN != "" || endpoint.UserID != oldEndpoint {
+		t.Fatalf("identity was switched before migration completed: UIN=%q userID=%q", adapter.UIN, endpoint.UserID)
 	}
 
 	emptyData, encodeErr := ds.NewDictVal(&ds.ValueMap{}).V().ToJSON()
@@ -1149,6 +1150,9 @@ func TestOfficialQQIdentityMigrationRetriesAfterFailure(t *testing.T) {
 	}
 	assertOfficialQQMigrationRow(t, db, &model.AttributesItemModel{}, "id = ?", newUserID)
 	assertOfficialQQMigrationMissing(t, db, &model.AttributesItemModel{}, "id IN ?", []string{oldUserID1, oldUserID2})
+	if adapter.UIN != uin || endpoint.UserID != formatDiceIDOfficialQQ(uin) {
+		t.Fatalf("identity was not applied after successful migration: UIN=%q userID=%q", adapter.UIN, endpoint.UserID)
+	}
 }
 
 func newOfficialQQMigrationTestGroup(groupID, endpointID, userID string) *GroupInfo {

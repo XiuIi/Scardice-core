@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -122,7 +123,8 @@ type PlatformAdapterOfficialQQ struct {
 	botID          string               `json:"-" yaml:"-"`
 
 	// Webhook服务
-	webhookServer *http.Server `json:"-" yaml:"-"`
+	webhookServer  *http.Server          `json:"-" yaml:"-"`
+	webhookDeduper *qqwebhook.TTLDeduper `json:"-" yaml:"-"`
 
 	paginationCache map[string]*PaginationItem `json:"-" yaml:"-"`
 	paginationMu    sync.Mutex                 `json:"-" yaml:"-"`
@@ -415,7 +417,7 @@ func (pa *PlatformAdapterOfficialQQ) Serve() int {
 		pa.Ctx, pa.CancelFunc = ctx, cancel
 		ep.State = 2
 		log.Info("official qq AppID 为空，进入扫码登录流程")
-		pa.serveQrLogin("sealdice")
+		pa.serveQrLogin(ctx, "sealdice")
 		return 0
 	}
 
@@ -468,13 +470,10 @@ func (pa *PlatformAdapterOfficialQQ) connect(probe *OfficialQQAccountProbeResult
 		return pa.failConnect()
 	}
 	if err := ensureOfficialQQIdentity(d, pa, botInfo.BotID, uin); err != nil {
-		var migrationErr *officialQQIdentityMigrationError
-		if errors.As(err, &migrationErr) {
-			log.Error("official qq 身份数据迁移失败，将继续启动并在下次连接时重试: ", err)
-		} else {
-			log.Error("official qq 身份初始化失败: ", err)
-			return pa.failConnect()
-		}
+		// 迁移失败时不能继续启动：后续消息会在新身份下创建群/玩家记录，
+		// 重试迁移时 ensureNoTarget 会拒绝这些已存在的目标记录，旧数据将永远迁不过去。
+		log.Error("official qq 身份初始化或数据迁移失败，端点停止启动，下次连接时将重试: ", err)
+		return pa.failConnect()
 	}
 
 	pa.botID = botInfo.BotID
@@ -496,12 +495,20 @@ func (pa *PlatformAdapterOfficialQQ) connect(probe *OfficialQQAccountProbeResult
 			pa.WebhookPort = 8099
 		}
 
+		// 先同步绑定端口：失败时走 failConnect 清理 Ctx。
+		// 否则 pa.Ctx 残留会让 SetEnable(true) 误判会话仍在运行而直接标记在线（假在线）。
+		addr := fmt.Sprintf(":%d", pa.WebhookPort)
+		ln, listenErr := net.Listen("tcp", addr)
+		if listenErr != nil {
+			log.Error("official qq webhook 监听端口失败: ", listenErr)
+			return pa.failConnect()
+		}
+
 		mux := http.NewServeMux()
 		mux.Handle(pa.WebhookPath, newOfficialQQWebhookHandler(pa, func(err error) {
 			log.Errorf("official qq webhook 处理失败: %v", err)
 		}))
 
-		addr := fmt.Sprintf(":%d", pa.WebhookPort)
 		pa.webhookServer = &http.Server{
 			Addr:              addr,
 			Handler:           mux,
@@ -510,11 +517,14 @@ func (pa *PlatformAdapterOfficialQQ) connect(probe *OfficialQQAccountProbeResult
 
 		go func() {
 			log.Infof("official qq webhook: 监听地址 %s%s", addr, pa.WebhookPath)
-			if err := pa.webhookServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Error("official qq webhook服务器启动失败: ", err)
+			if err := pa.webhookServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("official qq webhook服务器异常退出: ", err)
 				if pa.Ctx == ctx {
 					ep.State = 3
 					ep.Enable = false
+					// 清理会话上下文，让下次启用能真正重新监听
+					pa.stopSessionContext()
+					pa.shutdownWebhookServer()
 				}
 			}
 		}()
@@ -704,20 +714,20 @@ func (pa *PlatformAdapterOfficialQQ) InteractionReceive(eventRaw *dto.WSPayload,
 
 		switch data.ChatType {
 		case 0: // 频道
-			pa.sendBatchPage(eventCtx, item.BatchPages[pageIndex], tail, keyboardObj, data.ChannelID, "", "", "group", "channel")
+			pa.sendBatchPage(eventCtx, "", item.BatchPages[pageIndex], tail, keyboardObj, data.ChannelID, "", "", "group", "channel")
 		case 1: // 群
-			pa.sendBatchPage(eventCtx, item.BatchPages[pageIndex], tail, keyboardObj, "", data.GroupOpenID, formatDiceIDOfficialQQGroupOpenID(pa.UIN, data.GroupOpenID), "group", "group")
+			pa.sendBatchPage(eventCtx, "", item.BatchPages[pageIndex], tail, keyboardObj, "", data.GroupOpenID, formatDiceIDOfficialQQGroupOpenID(pa.UIN, data.GroupOpenID), "group", "group")
 		case 2: // C2C
-			pa.sendBatchPage(eventCtx, item.BatchPages[pageIndex], tail, keyboardObj, data.UserOpenID, "", "", "private", "c2c")
+			pa.sendBatchPage(eventCtx, "", item.BatchPages[pageIndex], tail, keyboardObj, data.UserOpenID, "", "", "private", "c2c")
 		default:
 			switch data.Scene {
 			case "group":
-				pa.sendBatchPage(eventCtx, item.BatchPages[pageIndex], tail, keyboardObj, "", data.GroupOpenID, formatDiceIDOfficialQQGroupOpenID(pa.UIN, data.GroupOpenID), "group", "group")
+				pa.sendBatchPage(eventCtx, "", item.BatchPages[pageIndex], tail, keyboardObj, "", data.GroupOpenID, formatDiceIDOfficialQQGroupOpenID(pa.UIN, data.GroupOpenID), "group", "group")
 			case "c2c":
-				pa.sendBatchPage(eventCtx, item.BatchPages[pageIndex], tail, keyboardObj, data.UserOpenID, "", "", "private", "c2c")
+				pa.sendBatchPage(eventCtx, "", item.BatchPages[pageIndex], tail, keyboardObj, data.UserOpenID, "", "", "private", "c2c")
 			default:
 				if data.ChannelID != "" {
-					pa.sendBatchPage(eventCtx, item.BatchPages[pageIndex], tail, keyboardObj, data.ChannelID, "", "", "group", "channel")
+					pa.sendBatchPage(eventCtx, "", item.BatchPages[pageIndex], tail, keyboardObj, data.ChannelID, "", "", "group", "channel")
 				}
 			}
 		}
@@ -890,8 +900,9 @@ func (pa *PlatformAdapterOfficialQQ) newEventMsgContext(eventID string) *MsgCont
 
 // sendBatchPage 发送富媒体批量分页的一页：逐条发送内容消息
 // 再视情况以尾部纯文本消息承载“继续查看”按钮(占被动窗口第 5 条)。
+// rowMsgID 为被动回复所引用的消息 ID；缺失时底层会走主动消息额度。
 
-func (pa *PlatformAdapterOfficialQQ) sendBatchPage(ctx *MsgContext, page []string, tail string, keyboardObj *keyboard.MessageKeyboard, receiverID, groupID, targetGroupID, msgType, kind string) {
+func (pa *PlatformAdapterOfficialQQ) sendBatchPage(ctx *MsgContext, rowMsgID string, page []string, tail string, keyboardObj *keyboard.MessageKeyboard, receiverID, groupID, targetGroupID, msgType, kind string) {
 	recordCtx := &MsgContext{
 		EndPoint: pa.EndPoint,
 		Session:  pa.EndPoint.Session,
@@ -917,11 +928,11 @@ func (pa *PlatformAdapterOfficialQQ) sendBatchPage(ctx *MsgContext, page []strin
 		var err error
 		switch kind {
 		case "c2c":
-			msg, err = pa.sendC2CMsgRaw(ctx, "", receiverID, text, kb)
+			msg, err = pa.sendC2CMsgRaw(ctx, rowMsgID, receiverID, text, kb)
 		case "group":
-			msg, err = pa.sendQQGroupMsgRaw(ctx, "", groupID, text, kb)
+			msg, err = pa.sendQQGroupMsgRaw(ctx, rowMsgID, groupID, text, kb)
 		case "channel":
-			msg, err = pa.sendQQChannelMsgRaw(ctx, "", receiverID, text, kb)
+			msg, err = pa.sendQQChannelMsgRaw(ctx, rowMsgID, receiverID, text, kb)
 		case "guildDM":
 			if ctx == nil || ctx.Group == nil {
 				pa.EndPoint.Session.Parent.Logger.Error("official qq 发送频道私信消息失败：无有效的上下文信息")
@@ -995,16 +1006,17 @@ func (pa *PlatformAdapterOfficialQQ) packAndCacheBatchPages(units []officialQQMs
 
 // sendBatchFirstPage 统一发送批量分页的第一页，
 // 根据 idType 分发到 C2C/频道私信/群聊/频道。
-func (pa *PlatformAdapterOfficialQQ) sendBatchFirstPage(ctx *MsgContext, activeCtx *MsgContext, uid string, idType int, receiverID, groupID string, batchPages []string, tail string, keyboardObj *keyboard.MessageKeyboard) {
+// rowMsgID 为触发消息的 ID，使分页首条保持被动回复，不占主动消息额度。
+func (pa *PlatformAdapterOfficialQQ) sendBatchFirstPage(ctx *MsgContext, activeCtx *MsgContext, rowMsgID string, uid string, idType int, receiverID, groupID string, batchPages []string, tail string, keyboardObj *keyboard.MessageKeyboard) {
 	switch idType {
 	case OpenQQUserOpenid:
-		pa.sendBatchPage(activeCtx, batchPages, tail, keyboardObj, receiverID, "", "", "private", "c2c")
+		pa.sendBatchPage(activeCtx, rowMsgID, batchPages, tail, keyboardObj, receiverID, "", "", "private", "c2c")
 	case OpenQQCHUser:
-		pa.sendBatchPage(ctx, batchPages, tail, keyboardObj, receiverID, "", "", "private", "guildDM")
+		pa.sendBatchPage(ctx, rowMsgID, batchPages, tail, keyboardObj, receiverID, "", "", "private", "guildDM")
 	case OpenQQGroupOpenid:
-		pa.sendBatchPage(activeCtx, batchPages, tail, keyboardObj, "", groupID, uid, "group", "group")
+		pa.sendBatchPage(activeCtx, rowMsgID, batchPages, tail, keyboardObj, "", groupID, uid, "group", "group")
 	case OpenQQCHChannel:
-		pa.sendBatchPage(activeCtx, batchPages, tail, keyboardObj, receiverID, "", uid, "group", "channel")
+		pa.sendBatchPage(activeCtx, rowMsgID, batchPages, tail, keyboardObj, receiverID, "", uid, "group", "channel")
 	default:
 		if uid != "" {
 			pa.EndPoint.Session.Parent.Logger.Errorf("official qq 发送消息失败：错误的id[%s]类型-%d", uid, idType)
@@ -1538,6 +1550,10 @@ func (pa *PlatformAdapterOfficialQQ) buildBatchTail(pageIndex, totalPages int, b
 }
 
 func (pa *PlatformAdapterOfficialQQ) shutdownWebhookServer() {
+	if pa.webhookDeduper != nil {
+		pa.webhookDeduper.Stop()
+		pa.webhookDeduper = nil
+	}
 	if pa.webhookServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if err := pa.webhookServer.Shutdown(ctx); err != nil {
@@ -1697,7 +1713,7 @@ func (pa *PlatformAdapterOfficialQQ) SendToPerson(ctx *MsgContext, uid string, t
 
 	if pa.EndPoint.Session.Parent.Config.OfficialQQUseMarkdown && len(units) > officialQQPassiveMsgLimit {
 		firstPage, tail, keyboardObj := pa.packAndCacheBatchPages(units)
-		pa.sendBatchFirstPage(ctx, activeCtx, uid, idType, userID, "", firstPage, tail, keyboardObj)
+		pa.sendBatchFirstPage(ctx, activeCtx, activeRowID, uid, idType, userID, "", firstPage, tail, keyboardObj)
 		return
 	}
 
@@ -2299,7 +2315,7 @@ func (pa *PlatformAdapterOfficialQQ) SendToGroup(ctx *MsgContext, uid string, te
 
 	if pa.EndPoint.Session.Parent.Config.OfficialQQUseMarkdown && len(units) > officialQQPassiveMsgLimit {
 		firstPage, tail, keyboardObj := pa.packAndCacheBatchPages(units)
-		pa.sendBatchFirstPage(ctx, activeCtx, uid, idType, groupId, groupId, firstPage, tail, keyboardObj)
+		pa.sendBatchFirstPage(ctx, activeCtx, activeRowID, uid, idType, groupId, groupId, firstPage, tail, keyboardObj)
 		return
 	}
 
@@ -2733,12 +2749,19 @@ func (pa *PlatformAdapterOfficialQQ) ServeWebhook() int {
 // 它会在验签前处理 op=13 回调地址校验，并统一处理 op=1 心跳、op=12 ACK、
 // 事件去重/panic 隔离以及异步处理。
 func newOfficialQQWebhookHandler(pa *PlatformAdapterOfficialQQ, onError func(error)) http.Handler {
+	// NewHandler 不会自动创建去重器；官方平台可能重复推送同一事件，
+	// 缺少 Deduper 时同一条消息会被处理两次。
+	if pa.webhookDeduper != nil {
+		pa.webhookDeduper.Stop()
+	}
+	pa.webhookDeduper = qqwebhook.NewTTLDeduper(0, 0)
 	options := qqwebhook.HandlerOptions{
 		Credentials: &qqtoken.QQBotCredentials{
 			AppID:     pa.AppID,
 			AppSecret: pa.AppSecret,
 		},
 		AckMode: qqwebhook.AckAsync,
+		Deduper: pa.webhookDeduper,
 	}
 	if onError != nil {
 		options.ErrorHandler = onError
@@ -3145,7 +3168,7 @@ func (pa *PlatformAdapterOfficialQQ) failQrLogin(logMsg string, err error) {
 //   - 二维码过期自动刷新
 //   - 扫码成功后落盘凭据、显式探测、检查重复账号，再启动连接
 //   - 失败/取消置状态为 Failed
-func (pa *PlatformAdapterOfficialQQ) serveQrLogin(source string) {
+func (pa *PlatformAdapterOfficialQQ) serveQrLogin(loginCtx context.Context, source string) {
 	ep := pa.EndPoint
 	d := ep.Session.Parent
 	log := d.Logger
@@ -3185,12 +3208,31 @@ func (pa *PlatformAdapterOfficialQQ) serveQrLogin(source string) {
 	log.Info("official qq 扫码二维码已就绪")
 
 	go func() {
+		// 轮询期间端点可能被停用（SetEnable(false) 会取消并清空 pa.Ctx），
+		// 必须使用启动时捕获的 context；每轮重新读 pa.Ctx 会在停用后空指针 panic。
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("official qq 扫码轮询协程 panic: %v\n%s", r, debug.Stack())
+				pa.qrMu.Lock()
+				isQrFlow := pa.QrLoginState == OfficialQQLoginStateConnecting ||
+					pa.QrLoginState == OfficialQQLoginStateQRWaitingForScan ||
+					pa.QrLoginState == OfficialQQLoginStateQRScanned
+				pa.qrMu.Unlock()
+				if isQrFlow {
+					pa.stopSessionContext()
+					pa.markQrLoginFailed()
+					ep.State = 3
+					ep.Enable = false
+				}
+			}
+		}()
+
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
 		for {
 			select {
-			case <-pa.Ctx.Done():
+			case <-loginCtx.Done():
 				return
 			case <-ticker.C:
 			}

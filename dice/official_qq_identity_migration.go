@@ -92,10 +92,6 @@ func ensureOfficialQQIdentity(d *Dice, pa *PlatformAdapterOfficialQQ, botID, uin
 	if current := pa.EndPoint.UserID; current != "" && current != oldEndpoint && current != expectedEndpoint {
 		return fmt.Errorf("无法识别旧账号 ID %q，期望 %q", current, oldEndpoint)
 	}
-	// The verified runtime identity is required even when the optional legacy
-	// data migration is disabled or fails.
-	pa.UIN = uin
-	pa.EndPoint.UserID = expectedEndpoint
 
 	if d.Config.OfficialQQMigrationEnable {
 		migration := &officialQQIdentityMigration{
@@ -110,6 +106,11 @@ func ensureOfficialQQIdentity(d *Dice, pa *PlatformAdapterOfficialQQ, botID, uin
 			return &officialQQIdentityMigrationError{cause: err}
 		}
 	}
+
+	// 迁移成功后才切换运行时身份：若迁移失败时提前切换，端点继续运行会在新身份下
+	// 写入群/玩家记录，重试迁移时 ensureNoTarget 会拒绝这些已存在的目标记录。
+	pa.UIN = uin
+	pa.EndPoint.UserID = expectedEndpoint
 
 	d.LastUpdatedTime = time.Now().Unix()
 	d.Save(false)

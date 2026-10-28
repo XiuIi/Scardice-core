@@ -1026,6 +1026,10 @@ func ImConnectionsAddOfficialQQ(c echo.Context) error {
 		}
 	}
 	appIDStr = strings.TrimSpace(appIDStr)
+	// 旧版接口以数字 0 表示扫码登录；JSON 数字零经上面的转换会变成字符串 "0"，一并视为未填写
+	if appIDStr == "0" {
+		appIDStr = ""
+	}
 	appSecret := strings.TrimSpace(v.AppSecret)
 
 	// AppID 为空时走扫码登录：入口时尚无凭据，探测与重复检查在扫码成功后进行
