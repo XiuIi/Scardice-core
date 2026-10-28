@@ -65,6 +65,8 @@ type Message struct {
 	Platform    string      `jsbind:"platform"    json:"platform"` // 当前平台
 	GroupName   string      `json:"groupName"`
 	TmpUID      string      `json:"-"             yaml:"-"`
+	// MentionedInfo carries platform-provided display names keyed by normalized
+	MentionedInfo map[string]string `json:"-" yaml:"-"`
 	Seq         int64       `jsbind:"seq"         json:"seq"` // 平台消息序号，0=不可用/不支持
 	// Note(Szzrain): 这里是消息段，为了支持多种消息类型，目前只有 Milky 支持，其他平台也应该尽快迁移支持，并使用 Session.ExecuteNew 方法
 	Segment []message.IMessageElement `jsbind:"segment" json:"-" yaml:"-"`
@@ -1236,6 +1238,7 @@ func (s *IMSession) Execute(ep *EndPointInfo, msg *Message, runInSync bool) {
 		platformPrefix := msg.Platform
 		cmdArgs := CommandParse(msg.Message, cmdLst, d.CommandPrefix, platformPrefix, false)
 		if cmdArgs != nil {
+			cmdArgs.applyMentionedInfo(msg)
 			mctx.CommandID = getNextCommandID()
 
 			var tmpUID string

@@ -1233,6 +1233,17 @@ func (d *Dice) PublicDiceSetupTick() {
 	d.PublicDiceTimerId, _ = d.Cron.AddFunc("@every 3m", doTickUpdate)
 }
 
+func publicDiceEndpointAppID(endpoint *EndPointInfo) string {
+	if endpoint == nil || endpoint.Platform != "QQ" || endpoint.ProtocolType != "official" {
+		return ""
+	}
+	adapter, ok := endpoint.Adapter.(*PlatformAdapterOfficialQQ)
+	if !ok || adapter == nil {
+		return ""
+	}
+	return adapter.AppID
+}
+
 func (d *Dice) PublicDiceSetup() {
 	d.PublicDice = public_dice.NewClient("https://api.weizaima.com", "")
 

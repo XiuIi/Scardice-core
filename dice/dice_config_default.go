@@ -24,6 +24,9 @@ var DefaultConfig = Config{
 		QQChannelAutoOn:         false,
 		QQChannelLogMessage:     false,
 		QQEnablePoke:            true,
+		OfficialQQFileSendBase64: false,
+		OfficialQQUseMarkdown:    false,
+		OfficialQQNameCardTmpl:   DefaultOfficialQQNameCardTemplate,
 		TextCmdTrustOnly:        true,
 		IgnoreUnaddressedBotCmd: false,
 		UILogLimit:              0,
@@ -47,6 +50,7 @@ var DefaultConfig = Config{
 		VMVersionForMsg:         "v2",
 		Name:                    "default",
 		DataDir:                 "data/default",
+		OfficialQQMigrationEnable: false,
 	},
 	RateLimitConfig{
 		RateLimitEnabled:          false,

@@ -156,6 +156,10 @@ type BaseConfig struct {
 	QQChannelAutoOn         bool       `json:"QQChannelAutoOn"         yaml:"QQChannelAutoOn"`         // QQ频道中自动开启(默认不开)
 	QQChannelLogMessage     bool       `json:"QQChannelLogMessage"     yaml:"QQChannelLogMessage"`     // QQ频道中记录消息(默认不开)
 	QQEnablePoke            bool       `json:"QQEnablePoke"            yaml:"QQEnablePoke"`            // 启用戳一戳
+	OfficialQQFileSendBase64 bool      `json:"officialQQFileSendBase64" yaml:"officialQQFileSendBase64"` // 是否使用base64发送本地/非公网文件
+	OfficialQQUseMarkdown    bool      `json:"officialQQUseMarkdown"    yaml:"officialQQUseMarkdown"`    // 是否自动把消息全转为markdown类型消息
+	OfficialQQUseNameCard    bool      `json:"officialQQUseNameCard"    yaml:"officialQQUseNameCard"`    // 是否在官方QQ回复顶部显示玩家.sn名片，需要同时启用Markdown
+	OfficialQQNameCardTmpl   string    `json:"officialQQUseNameCardTemplate" yaml:"officialQQUseNameCardTemplate"` // 名片渲染模板，{card} 为名片内容占位符
 	TextCmdTrustOnly        bool       `json:"textCmdTrustOnly"        yaml:"textCmdTrustOnly"`        // 只允许信任用户或master使用text指令
 	IgnoreUnaddressedBotCmd bool       `json:"ignoreUnaddressedBotCmd" yaml:"ignoreUnaddressedBotCmd"` // 不响应群聊裸bot指令
 	UILogLimit              int64      `json:"-"                       yaml:"UILogLimit"`
@@ -182,6 +186,8 @@ type BaseConfig struct {
 	// TODO: 历史遗留问题，由于不输出DICE日志效果过差，已经抹除日志输出选项，剩余两个选项，私以为可以想办法也抹除掉。
 	Name    string `yaml:"name"`    // 名称，默认为default
 	DataDir string `yaml:"dataDir"` // 数据路径，为./data/{name}，例如data/default
+
+	OfficialQQMigrationEnable bool `json:"officialQQEnableIdentityMigration" yaml:"officialQQEnableIdentityMigration"` // 启动 QQ 官方旧身份数据迁移
 }
 
 type RateLimitConfig struct {
