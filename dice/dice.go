@@ -1126,6 +1126,7 @@ func (d *Dice) PublicDiceEndpointRefresh() {
 		endpointItems = append(endpointItems, &public_dice.Endpoint{
 			Platform: i.Platform,
 			UID:      i.UserID,
+			AppID:    publicDiceEndpointAppID(i),
 			IsOnline: i.State == 1,
 		})
 	}
@@ -1207,6 +1208,7 @@ func (d *Dice) PublicDiceSetupTick() {
 			}
 			tickEndpointItems = append(tickEndpointItems, &public_dice.TickEndpoint{
 				UID:      i.UserID,
+				AppID:    publicDiceEndpointAppID(i),
 				IsOnline: i.State == 1,
 			})
 		}
