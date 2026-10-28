@@ -388,6 +388,8 @@ func TestExecuteNew_CustomHelpSections(t *testing.T) {
 		if got := d.TextMapHelpInfo["核心"][test.key].SubType; got != ".help" {
 			t.Fatalf("%s help subtype = %q, want .help", test.arg, got)
 		}
+		// 等待上一条消息的异步命令任务收尾，避免下一轮 ExecuteNew 与其并发访问同一 GroupInfo（-race 检测）
+		d.messageTasks.Wait()
 	}
 }
 

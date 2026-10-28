@@ -67,7 +67,7 @@ type Message struct {
 	TmpUID      string      `json:"-"             yaml:"-"`
 	// MentionedInfo carries platform-provided display names keyed by normalized
 	MentionedInfo map[string]string `json:"-" yaml:"-"`
-	Seq         int64       `jsbind:"seq"         json:"seq"` // 平台消息序号，0=不可用/不支持
+	Seq           int64             `jsbind:"seq"         json:"seq"` // 平台消息序号，0=不可用/不支持
 	// Note(Szzrain): 这里是消息段，为了支持多种消息类型，目前只有 Milky 支持，其他平台也应该尽快迁移支持，并使用 Session.ExecuteNew 方法
 	Segment []message.IMessageElement `jsbind:"segment" json:"-" yaml:"-"`
 }
@@ -1463,6 +1463,20 @@ func (s *IMSession) Execute(ep *EndPointInfo, msg *Message, runInSync bool) {
 	}
 }
 
+// runMessageTask tracks asynchronous commands, extension callbacks and notices.
+// Callers must stop submitting new work before waiting on messageTasks.
+func (d *Dice) runMessageTask(task func()) {
+	if d == nil {
+		go task()
+		return
+	}
+	d.messageTasks.Add(1)
+	go func() {
+		defer d.messageTasks.Done()
+		task()
+	}()
+}
+
 // ExecuteNew Note(Szzrain): 既不破坏兼容性还要支持新 feature 我真是草了，这里是 copy paste 的代码稍微改了一下，我知道这是在屎山上建房子，但是没办法
 // 只有在 Adapter 内部实现了新的消息段解析才能使用这个方法，即 Message.Segment 有值
 // 为了避免破坏兼容性，Message.Message 中的内容不会被解析但仍然会赋值
@@ -1676,7 +1690,7 @@ func (s *IMSession) ExecuteNew(ep *EndPointInfo, msg *Message) {
 	// Note(Szzrain): 赋值临时变量，不然有些地方没法用
 	SetTempVars(mctx, msg.Sender.Nickname)
 	if cmdArgs != nil {
-		go s.PreTriggerCommand(mctx, msg, cmdArgs)
+		d.runMessageTask(func() { s.PreTriggerCommand(mctx, msg, cmdArgs) })
 	} else {
 		// if cmdArgs == nil will execute this block
 		if mctx.PrivilegeLevel == -30 {
@@ -1926,12 +1940,15 @@ func (s *IMSession) OnGroupJoined(ctx *MsgContext, msg *Message) {
 		// 稍作等待后发送入群致词
 		time.Sleep(2 * time.Second)
 
-		ctx.Player = &GroupPlayerInfo{}
+		// 入群致辞使用独立上下文：主流程(Notice/扩展钩子)与致辞协程并发使用同一 ctx，
+		// 在协程内直接改写共享 ctx.Player 会构成数据竞争。
+		welcomeCtx := ctx.ShallowCopy()
+		welcomeCtx.Player = &GroupPlayerInfo{}
 		log.Infof("发送入群致辞，群: <%s>(%s)", groupName, msg.GroupID)
-		text := DiceFormatTmpl(ctx, "核心:骰子进群")
+		text := DiceFormatTmpl(welcomeCtx, "核心:骰子进群")
 		// forward() 的边界必须先由统一回复规划器解析；提前按 SPLIT
 		// 切分会把起止边界拆到不同消息并泄漏 FORWARD-END 标记。
-		ReplyGroup(ctx, msg, text)
+		ReplyGroup(welcomeCtx, msg, text)
 	}()
 	txt := fmt.Sprintf("加入群组: <%s>(%s)", groupName, msg.GroupID)
 	log.Info(txt)
