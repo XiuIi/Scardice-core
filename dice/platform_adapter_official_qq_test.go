@@ -31,6 +31,13 @@ func (f officialQQTransportFunc) Transport(ctx context.Context, method, url stri
 func TestOfficialQQWebhookHandlerValidation(t *testing.T) {
 	pa := &PlatformAdapterOfficialQQ{AppID: "app", AppSecret: "secret"}
 	handler := newOfficialQQWebhookHandler(pa, nil)
+	// newOfficialQQWebhookHandler 会创建 TTLDeduper（内含后台协程），
+	// 测试不经过 connect 的关闭路径，必须手动 Stop，否则 goleak 判定泄漏。
+	t.Cleanup(func() {
+		if pa.webhookDeduper != nil {
+			pa.webhookDeduper.Stop()
+		}
+	})
 
 	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(
 		`{"op":13,"d":{"plain_token":"plain","event_ts":"123456"}}`,
@@ -53,6 +60,11 @@ func TestOfficialQQWebhookHandlerValidation(t *testing.T) {
 func TestOfficialQQWebhookHandlerStillVerifiesDispatchSignature(t *testing.T) {
 	pa := &PlatformAdapterOfficialQQ{AppID: "app", AppSecret: "secret"}
 	handler := newOfficialQQWebhookHandler(pa, nil)
+	t.Cleanup(func() {
+		if pa.webhookDeduper != nil {
+			pa.webhookDeduper.Stop()
+		}
+	})
 
 	req := httptest.NewRequest(http.MethodPost, "/webhook", strings.NewReader(`{"op":0,"d":{}}`))
 	rec := httptest.NewRecorder()
