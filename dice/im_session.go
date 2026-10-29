@@ -1930,7 +1930,7 @@ func (s *IMSession) OnGroupJoined(ctx *MsgContext, msg *Message) {
 	}
 	time.Sleep(2 * time.Second)
 	groupName := dm.TryGetGroupName(msg.GroupID)
-	go func() {
+	d.runMessageTask(func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Errorf("入群致辞异常: %v 堆栈: %v", r, string(debug.Stack()))
@@ -1941,15 +1941,17 @@ func (s *IMSession) OnGroupJoined(ctx *MsgContext, msg *Message) {
 		time.Sleep(2 * time.Second)
 
 		// 入群致辞使用独立上下文：主流程(Notice/扩展钩子)与致辞协程并发使用同一 ctx，
-		// 在协程内直接改写共享 ctx.Player 会构成数据竞争。
+		// 在协程内直接改写共享 ctx.Player 会构成数据竞争。VM 也必须清空，
+		// 避免与主流程共用同一 *ds.VM。
 		welcomeCtx := ctx.ShallowCopy()
+		welcomeCtx.vm = nil
 		welcomeCtx.Player = &GroupPlayerInfo{}
 		log.Infof("发送入群致辞，群: <%s>(%s)", groupName, msg.GroupID)
 		text := DiceFormatTmpl(welcomeCtx, "核心:骰子进群")
 		// forward() 的边界必须先由统一回复规划器解析；提前按 SPLIT
 		// 切分会把起止边界拆到不同消息并泄漏 FORWARD-END 标记。
 		ReplyGroup(welcomeCtx, msg, text)
-	}()
+	})
 	txt := fmt.Sprintf("加入群组: <%s>(%s)", groupName, msg.GroupID)
 	log.Info(txt)
 	ctx.Notice(txt, NoticeTypeGroup)

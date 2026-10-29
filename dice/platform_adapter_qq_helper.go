@@ -233,6 +233,11 @@ func serverOfficialQQ(d *Dice, ep *EndPointInfo, conn *PlatformAdapterOfficialQQ
 	waitTimes := 0
 
 	for {
+		// 用户在重试等待期间停用端点时，不能再重新 Serve 把端点拉起来。
+		if !ep.Enable {
+			conn.DiceServing = false
+			return
+		}
 		// 骰子开始连接
 		d.Logger.Infof("开始连接 official qq，帐号 <%s>(%s)，重试计数[%d/%d]", ep.Nickname, ep.UserID, waitTimes, 5)
 		ret := ep.Adapter.Serve()

@@ -75,6 +75,167 @@ func TestOfficialQQWebhookHandlerStillVerifiesDispatchSignature(t *testing.T) {
 	}
 }
 
+func TestNormalizeOfficialQQAppID(t *testing.T) {
+	cases := map[string]string{
+		"":          "",
+		" 0 ":       "",
+		"123456789": "123456789",
+		"000":       "000",
+	}
+	for input, want := range cases {
+		if got := NormalizeOfficialQQAppID(input); got != want {
+			t.Errorf("NormalizeOfficialQQAppID(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestNormalizeOfficialQQWebhookPath(t *testing.T) {
+	valid := map[string]string{
+		"":          "/webhook",
+		"webhook":   "/webhook",
+		"/webhook":  "/webhook",
+		" /qq/hook": "/qq/hook",
+	}
+	for input, want := range valid {
+		got, err := NormalizeOfficialQQWebhookPath(input)
+		if err != nil || got != want {
+			t.Errorf("NormalizeOfficialQQWebhookPath(%q) = %q, %v; want %q, nil", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"bad path", "/bad{}", "/bad?x=1", "/bad#frag"} {
+		if _, err := NormalizeOfficialQQWebhookPath(input); err == nil {
+			t.Errorf("NormalizeOfficialQQWebhookPath(%q) unexpectedly succeeded", input)
+		}
+	}
+}
+
+func TestRegisterOfficialQQWebhookRejectsInvalidPattern(t *testing.T) {
+	mux := http.NewServeMux()
+	if err := registerOfficialQQWebhook(mux, "webhook", http.NotFoundHandler()); err == nil {
+		t.Fatal("invalid ServeMux pattern was accepted")
+	}
+}
+
+func TestFormatOfficialQQBotAppID(t *testing.T) {
+	cases := []struct {
+		input any
+		want  string
+	}{
+		{"123456789", "123456789"},
+		{float64(123456789), "123456789"},
+		{json.Number("987654321"), "987654321"},
+		{nil, ""},
+	}
+	for _, tc := range cases {
+		if got := formatOfficialQQBotAppID(tc.input); got != tc.want {
+			t.Errorf("formatOfficialQQBotAppID(%#v) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestOfficialQQIdentityMigrationRefusesLegacyDataWhenDisabled(t *testing.T) {
+	const (
+		appID = "123456789"
+		uin   = "1"
+		botID = "bot-open-id"
+	)
+	dataDir := t.TempDir()
+	dbOperator, openErr := newMockDatabaseOperator(filepath.Join(dataDir, "official-qq-legacy-guard.db"))
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	t.Cleanup(dbOperator.Close)
+	db := dbOperator.db
+	if err := db.AutoMigrate(&model.GroupInfo{}, &model.EndpointInfo{}); err != nil {
+		t.Fatal(err)
+	}
+	oldGroupID := "OpenQQ-Group-T:" + appID + "-legacy-group"
+	timestamp := int64(1)
+	if err := db.Create(&model.GroupInfo{ID: oldGroupID, CreatedAt: timestamp, UpdatedAt: &timestamp, Data: []byte("{}")}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	endpoint := &EndPointInfo{EndPointInfoBase: EndPointInfoBase{
+		ID:           "legacy-official-qq",
+		Platform:     "QQ",
+		ProtocolType: "official",
+		UserID:       formatDiceIDOfficialQQ(uin),
+	}}
+	adapter := &PlatformAdapterOfficialQQ{EndPoint: endpoint, AppID: appID}
+	endpoint.Adapter = adapter
+	d := &Dice{
+		BaseConfig: BaseConfig{DataDir: dataDir, Name: "default"},
+		DBOperator: dbOperator,
+		Logger:     sealdiceLogger.M(),
+		ImSession: &IMSession{
+			EndPoints:    []*EndPointInfo{endpoint},
+			ServiceAtNew: new(SyncMap[string, *GroupInfo]),
+			PendingQuits: new(SyncMap[string, *PendingQuitInfo]),
+		},
+		DirtyGroups: new(SyncMap[string, int64]),
+		Parent:      &DiceManager{},
+	}
+	d.ImSession.Parent = d
+	d.Config = NewConfig(d) // OfficialQQMigrationEnable 默认 false
+	endpoint.BindRuntime(d.ImSession)
+
+	if err := ensureOfficialQQIdentity(d, adapter, botID, uin); err == nil {
+		t.Fatal("legacy data with migration disabled was not rejected")
+	}
+	if adapter.UIN != "" {
+		t.Fatalf("identity was switched despite legacy data: UIN=%q", adapter.UIN)
+	}
+}
+
+func TestOfficialQQIdentityMigrationAllowsFreshEndpointWhenDisabled(t *testing.T) {
+	const (
+		appID = "123456789"
+		uin   = "1"
+		botID = "bot-open-id"
+	)
+	dataDir := t.TempDir()
+	dbOperator, openErr := newMockDatabaseOperator(filepath.Join(dataDir, "official-qq-fresh.db"))
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	t.Cleanup(dbOperator.Close)
+	if err := dbOperator.db.AutoMigrate(&model.GroupInfo{}, &model.EndpointInfo{}); err != nil {
+		t.Fatal(err)
+	}
+
+	endpoint := &EndPointInfo{EndPointInfoBase: EndPointInfoBase{
+		ID:           "fresh-official-qq",
+		Platform:     "QQ",
+		ProtocolType: "official",
+		UserID:       formatDiceIDOfficialQQ(botID),
+	}}
+	adapter := &PlatformAdapterOfficialQQ{EndPoint: endpoint, AppID: appID}
+	endpoint.Adapter = adapter
+	d := &Dice{
+		BaseConfig: BaseConfig{DataDir: dataDir, Name: "default"},
+		DBOperator: dbOperator,
+		Logger:     sealdiceLogger.M(),
+		ImSession: &IMSession{
+			EndPoints:    []*EndPointInfo{endpoint},
+			ServiceAtNew: new(SyncMap[string, *GroupInfo]),
+			PendingQuits: new(SyncMap[string, *PendingQuitInfo]),
+		},
+		DirtyGroups: new(SyncMap[string, int64]),
+		Parent:      &DiceManager{},
+	}
+	d.ImSession.Parent = d
+	d.Config = NewConfig(d)
+	d.AttrsManager = &AttrsManager{db: dbOperator}
+	endpoint.BindRuntime(d.ImSession)
+
+	if err := ensureOfficialQQIdentity(d, adapter, botID, uin); err != nil {
+		t.Fatalf("fresh endpoint was rejected without migration: %v", err)
+	}
+	if adapter.UIN != uin || endpoint.UserID != formatDiceIDOfficialQQ(uin) {
+		t.Fatalf("identity not applied: UIN=%q userID=%q", adapter.UIN, endpoint.UserID)
+	}
+}
+
 func TestServerOfficialQQSkipsRunningSessionBeforeStateChange(t *testing.T) {
 	t.Parallel()
 
@@ -890,8 +1051,8 @@ func TestOfficialQQIdentityMigration(t *testing.T) {
 	endpoint.BindRuntime(d.ImSession)
 	d.ImSession.EndPoints = []*EndPointInfo{endpoint}
 
-	if err := ensureOfficialQQIdentity(d, adapter, botID, uin); err != nil {
-		t.Fatalf("identity initialization with migration disabled failed: %v", err)
+	if err := ensureOfficialQQIdentity(d, adapter, botID, uin); err == nil {
+		t.Fatal("identity initialization unexpectedly accepted legacy data with migration disabled")
 	}
 	assertOfficialQQMigrationRow(t, db, &model.GroupInfo{}, "id = ?", oldGroupID)
 	assertOfficialQQMigrationMissing(t, db, &model.GroupInfo{}, "id = ?", newGroupID)

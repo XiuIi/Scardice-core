@@ -1025,12 +1025,14 @@ func ImConnectionsAddOfficialQQ(c echo.Context) error {
 			appIDStr = fmt.Sprintf("%v", val)
 		}
 	}
-	appIDStr = strings.TrimSpace(appIDStr)
-	// 旧版接口以数字 0 表示扫码登录；JSON 数字零经上面的转换会变成字符串 "0"，一并视为未填写
-	if appIDStr == "0" {
-		appIDStr = ""
-	}
+	appIDStr = dice.NormalizeOfficialQQAppID(appIDStr)
 	appSecret := strings.TrimSpace(v.AppSecret)
+
+	webhookPath, webhookErr := dice.NormalizeOfficialQQWebhookPath(v.WebhookPath)
+	if webhookErr != nil {
+		return Error(&c, webhookErr.Error(), Response{})
+	}
+	v.WebhookPath = webhookPath
 
 	// AppID 为空时走扫码登录：入口时尚无凭据，探测与重复检查在扫码成功后进行
 	if appIDStr == "" {

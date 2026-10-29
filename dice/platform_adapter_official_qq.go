@@ -77,6 +77,69 @@ func formatOfficialQQAtUser(target string) string {
 	return fmt.Sprintf(`<qqbot-at-user id="%s" />`, target)
 }
 
+// NormalizeOfficialQQAppID 把旧配置中用数字 0 表示“未配置/扫码登录”的 AppID
+// 归一化为空串，确保升级后仍能进入扫码流程。
+func NormalizeOfficialQQAppID(appID string) string {
+	appID = strings.TrimSpace(appID)
+	if appID == "0" {
+		return ""
+	}
+	return appID
+}
+
+// NormalizeOfficialQQWebhookPath 归一化 Webhook 路径并拒绝会让 ServeMux
+// 解析失败或产生歧义的字符，避免配置错误直接 panic 掉整个核心。
+func NormalizeOfficialQQWebhookPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "/webhook", nil
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if strings.ContainsAny(path, " \t\r\n{}?#\\") {
+		return "", fmt.Errorf("webhook 路径含非法字符: %q", path)
+	}
+	return path, nil
+}
+
+// registerOfficialQQWebhook 用 recover 包住 ServeMux.Handle，确保异常 pattern
+// 只导致本次端点启动失败，而不是让整个进程退出。
+func registerOfficialQQWebhook(mux *http.ServeMux, path string, handler http.Handler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("注册 webhook 路径 %q 失败: %v", path, r)
+		}
+	}()
+	mux.Handle(path, handler)
+	return nil
+}
+
+// formatOfficialQQBotAppID 把扫码接口返回的 bot_appid 转成十进制字符串。
+// 该字段在 JSON 中可能是字符串或数字，直接用 %v 处理数字会得到科学计数法。
+func formatOfficialQQBotAppID(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	case json.Number:
+		return strings.TrimSpace(v.String())
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
+}
+
 func renderOfficialQQGroupAtTarget(target string) string {
 	if target == "all" {
 		return ""
@@ -406,7 +469,7 @@ func (pa *PlatformAdapterOfficialQQ) Serve() int {
 		return 0
 	}
 
-	pa.AppID = strings.TrimSpace(pa.AppID)
+	pa.AppID = NormalizeOfficialQQAppID(pa.AppID)
 	pa.AppSecret = strings.TrimSpace(pa.AppSecret)
 	pa.UIN = strings.TrimSpace(pa.UIN)
 
@@ -430,7 +493,7 @@ func (pa *PlatformAdapterOfficialQQ) connect(probe *OfficialQQAccountProbeResult
 	ep := pa.EndPoint
 	log := ep.Session.Parent.Logger
 	d := ep.Session.Parent
-	pa.AppID = strings.TrimSpace(pa.AppID)
+	pa.AppID = NormalizeOfficialQQAppID(pa.AppID)
 	pa.AppSecret = strings.TrimSpace(pa.AppSecret)
 	pa.UIN = strings.TrimSpace(pa.UIN)
 
@@ -488,9 +551,12 @@ func (pa *PlatformAdapterOfficialQQ) connect(probe *OfficialQQAccountProbeResult
 	// 区分 Webhook 还是 WebSocket 模式
 	if pa.UseWebhook {
 		// 启动 webhook 服务
-		if pa.WebhookPath == "" {
-			pa.WebhookPath = "/webhook"
+		webhookPath, pathErr := NormalizeOfficialQQWebhookPath(pa.WebhookPath)
+		if pathErr != nil {
+			log.Error("official qq webhook 路径配置无效: ", pathErr)
+			return pa.failConnect()
 		}
+		pa.WebhookPath = webhookPath
 		if pa.WebhookPort == 0 {
 			pa.WebhookPort = 8099
 		}
@@ -505,19 +571,27 @@ func (pa *PlatformAdapterOfficialQQ) connect(probe *OfficialQQAccountProbeResult
 		}
 
 		mux := http.NewServeMux()
-		mux.Handle(pa.WebhookPath, newOfficialQQWebhookHandler(pa, func(err error) {
+		handler := newOfficialQQWebhookHandler(pa, func(err error) {
 			log.Errorf("official qq webhook 处理失败: %v", err)
-		}))
+		})
+		if err := registerOfficialQQWebhook(mux, pa.WebhookPath, handler); err != nil {
+			_ = ln.Close()
+			pa.shutdownWebhookServer()
+			log.Error("official qq webhook 路径注册失败: ", err)
+			return pa.failConnect()
+		}
 
-		pa.webhookServer = &http.Server{
+		srv := &http.Server{
 			Addr:              addr,
 			Handler:           mux,
 			ReadHeaderTimeout: 3 * time.Second,
 		}
+		pa.webhookServer = srv
 
 		go func() {
 			log.Infof("official qq webhook: 监听地址 %s%s", addr, pa.WebhookPath)
-			if err := pa.webhookServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// 使用局部 srv：停用端点可能把 pa.webhookServer 置 nil，不能直接解引用字段。
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Error("official qq webhook服务器异常退出: ", err)
 				if pa.Ctx == ctx {
 					ep.State = 3
@@ -3056,7 +3130,7 @@ func qqBotPollBindResult(taskID string) (*qqBotBindResult, error) {
 
 	return &qqBotBindResult{
 		Status:           result.Data.Status,
-		BotAppID:         fmt.Sprintf("%v", result.Data.BotAppID),
+		BotAppID:         formatOfficialQQBotAppID(result.Data.BotAppID),
 		BotEncryptSecret: result.Data.BotEncryptSecret,
 		UserOpenID:       result.Data.UserOpenID,
 	}, nil
@@ -3251,11 +3325,19 @@ func (pa *PlatformAdapterOfficialQQ) serveQrLogin(loginCtx context.Context, sour
 				log.Debugf("official qq 轮询扫码状态失败: %v", perr)
 				continue
 			}
+			if loginCtx.Err() != nil {
+				curSession.mu.Unlock()
+				return
+			}
 
 			switch result.Status {
 			case qqBotBindStatusComplete:
-				pa.AppID = strings.TrimSpace(result.BotAppID)
 				curSession.mu.Unlock()
+				// 停用端点会取消 loginCtx；此时不能再切换身份或启动连接。
+				if loginCtx.Err() != nil {
+					return
+				}
+				pa.AppID = NormalizeOfficialQQAppID(result.BotAppID)
 				if pa.AppID == "" {
 					pa.failQrLogin("official qq 扫码结果缺少 AppID: ", nil)
 					return
@@ -3277,14 +3359,24 @@ func (pa *PlatformAdapterOfficialQQ) serveQrLogin(loginCtx context.Context, sour
 				d.Save(false)
 				log.Infof("official qq 扫码成功，AppID=%s，开始探测凭据", pa.AppID)
 
-				// 停止扫码 context；后续探测与 connect 使用独立生命周期
-				pa.stopSessionContext()
-
+				// 停止扫码 context；后续探测与 connect 使用独立生命周期。
+				// 先完成探测再取消，这样探测期间用户停用仍能被 loginCtx.Err() 捕获。
 				probeCtx, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
 				probe, probeErr := ProbeOfficialQQAccount(probeCtx, pa.AppID, pa.AppSecret)
 				probeCancel()
 				if probeErr != nil {
 					pa.failQrLogin("official qq 扫码后凭据探测失败: ", probeErr)
+					return
+				}
+				if loginCtx.Err() != nil {
+					return
+				}
+				pa.stopSessionContext()
+				pa.qrMu.Lock()
+				qrConnecting := pa.QrLoginState == OfficialQQLoginStateConnecting
+				pa.qrMu.Unlock()
+				if !qrConnecting {
+					// 停用端点会 clearQrLoginState，不能把已停用的端点重新连上。
 					return
 				}
 
@@ -3323,6 +3415,12 @@ func (pa *PlatformAdapterOfficialQQ) serveQrLogin(loginCtx context.Context, sour
 				d.LastUpdatedTime = time.Now().Unix()
 				d.Save(false)
 				log.Infof("official qq 扫码探测完成，UIN=%s，开始连接", probe.UIN)
+				pa.qrMu.Lock()
+				qrConnecting = pa.QrLoginState == OfficialQQLoginStateConnecting
+				pa.qrMu.Unlock()
+				if !qrConnecting {
+					return
+				}
 				if pa.connect(probe) != 0 {
 					ep.Enable = false
 					d.LastUpdatedTime = time.Now().Unix()
@@ -3331,6 +3429,10 @@ func (pa *PlatformAdapterOfficialQQ) serveQrLogin(loginCtx context.Context, sour
 				return
 
 			case qqBotBindStatusExpired:
+				if loginCtx.Err() != nil {
+					curSession.mu.Unlock()
+					return
+				}
 				newTaskID, newKey, cerr := qqBotCreateBindTask()
 				if cerr != nil {
 					curSession.mu.Unlock()

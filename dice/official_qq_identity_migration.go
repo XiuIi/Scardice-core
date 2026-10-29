@@ -89,21 +89,30 @@ func ensureOfficialQQIdentity(d *Dice, pa *PlatformAdapterOfficialQQ, botID, uin
 
 	expectedEndpoint := formatDiceIDOfficialQQ(uin)
 	oldEndpoint := formatDiceIDOfficialQQ(botID)
-	if current := pa.EndPoint.UserID; current != "" && current != oldEndpoint && current != expectedEndpoint {
-		return fmt.Errorf("无法识别旧账号 ID %q，期望 %q", current, oldEndpoint)
+	currentEndpoint := strings.TrimSpace(pa.EndPoint.UserID)
+	if currentEndpoint != "" && currentEndpoint != oldEndpoint && currentEndpoint != expectedEndpoint {
+		return fmt.Errorf("无法识别旧账号 ID %q，期望 %q", currentEndpoint, oldEndpoint)
 	}
 
+	migration := &officialQQIdentityMigration{
+		appID:       pa.AppID,
+		uin:         uin,
+		oldEndpoint: oldEndpoint,
+		newEndpoint: expectedEndpoint,
+		groups:      map[string]string{},
+		users:       map[string]string{},
+	}
 	if d.Config.OfficialQQMigrationEnable {
-		migration := &officialQQIdentityMigration{
-			appID:       pa.AppID,
-			uin:         uin,
-			oldEndpoint: oldEndpoint,
-			newEndpoint: expectedEndpoint,
-			groups:      map[string]string{},
-			users:       map[string]string{},
-		}
 		if err := migration.run(d); err != nil {
 			return &officialQQIdentityMigrationError{cause: err}
+		}
+	} else {
+		hasLegacy, err := migration.hasLegacyIdentityData(d)
+		if err != nil {
+			return fmt.Errorf("检查 QQ 官方旧身份数据失败: %w", err)
+		}
+		if hasLegacy {
+			return errors.New("检测到 QQ 官方旧版身份数据，但 officialQQEnableIdentityMigration 未开启；请先在 serve.yaml 中设置 officialQQEnableIdentityMigration: true 再启动（迁移完成后可关闭），否则旧群/玩家数据会被新身份绕过")
 		}
 	}
 
@@ -350,17 +359,62 @@ func hasTable(db *gorm.DB, value any) bool {
 }
 
 func (m *officialQQIdentityMigration) shouldRunIdentityMigration(operator engine.DatabaseOperator) (bool, error) {
+	return m.probeLegacyIdentityData(operator, true)
+}
+
+// hasLegacyIdentityData 用于在迁移开关关闭时做一次“安全预检”：
+// 只有确认没有旧版数据时才允许切换身份，避免旧群/玩家数据被新身份静默绕过。
+func (m *officialQQIdentityMigration) hasLegacyIdentityData(d *Dice) (bool, error) {
+	if d == nil {
+		return false, nil
+	}
+	if d.DBOperator != nil {
+		found, err := m.probeLegacyIdentityData(d.DBOperator, false)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return true, nil
+		}
+	}
+	m.collectMemory(d)
+	if len(m.groups) > 0 || len(m.users) > 0 {
+		return true, nil
+	}
+	if d.AttrsManager != nil {
+		found := false
+		d.AttrsManager.m.Range(func(id string, _ *AttributesItem) bool {
+			if strings.HasPrefix(id, m.oldGroupPrefix()) || strings.HasPrefix(id, m.oldMemberRootPrefix()) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// probeLegacyIdentityData 检查数据库中的旧版身份数据。
+// conservative 为 true 时保留 shouldRunIdentityMigration 的历史语义：
+// group_info 表不存在时无法排除内存中的旧数据，直接返回 true。
+func (m *officialQQIdentityMigration) probeLegacyIdentityData(operator engine.DatabaseOperator, conservative bool) (bool, error) {
 	groupPrefix, groupUpperBound := m.oldGroupBounds()
 	memberPrefix, memberUpperBound := m.oldMemberBounds()
 
 	probes := []*gorm.DB{}
 	dataDB := operator.GetDataDB(constant.READ)
 	if !hasTable(dataDB, &model.GroupInfo{}) {
-		// Without group_info the optimized database probe cannot rule out
-		// legacy identities held only in memory, so preserve the full fallback.
-		return true, nil
+		if conservative {
+			// Without group_info the optimized database probe cannot rule out
+			// legacy identities held only in memory, so preserve the full fallback.
+			return true, nil
+		}
+	} else {
+		probes = append(probes, dataDB.Model(&model.GroupInfo{}).Where("id >= ? AND id < ?", groupPrefix, groupUpperBound))
 	}
-	probes = append(probes, dataDB.Model(&model.GroupInfo{}).Where("id >= ? AND id < ?", groupPrefix, groupUpperBound))
 
 	logDB := operator.GetLogDB(constant.READ)
 	if hasTable(logDB, &model.LogInfo{}) {
