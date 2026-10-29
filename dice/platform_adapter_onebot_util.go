@@ -1313,34 +1313,6 @@ func (p *PlatformAdapterOnebot) resolveLocalAsset(rel string) (string, error) {
 	return u, nil
 }
 
-// compatCardTextPayload 对 json/xml 卡片段做双键兼容。OneBot 11 标准把卡片载荷放在
-// "data" 字段（即 CQ 码的 data 参数名），但部分 OneBot 实现（如 SnowLuma）只认 "text"
-// 字段：载荷仅在 "data" 时其卡片签名链路按空载荷处理并降级为未签名卡片，QQ 端渲染为
-// "发送者版本过低，无法展示内容"。保持 "data" 不变以兼容标准实现，把同一载荷镜像到
-// "text"；载荷非字符串、无 data 键或已有 text 时不作修改。
-func compatCardTextPayload(rawType string, data sonic.NoCopyRawMessage) sonic.NoCopyRawMessage {
-	if rawType != "json" && rawType != "xml" {
-		return data
-	}
-	var m map[string]string
-	if err := sonic.Unmarshal(data, &m); err != nil {
-		return data
-	}
-	payload, ok := m["data"]
-	if !ok || payload == "" {
-		return data
-	}
-	if _, exists := m["text"]; exists {
-		return data
-	}
-	m["text"] = payload
-	out, err := sonic.Marshal(m)
-	if err != nil {
-		return data
-	}
-	return sonic.NoCopyRawMessage(out)
-}
-
 func (p *PlatformAdapterOnebot) convertSealMsgToMessageChain(msg []message.IMessageElement) (schema.MessageChain, string) {
 	cqMessage := strings.Builder{}
 	rawMsg := schema.MessageChain{}
@@ -1472,7 +1444,7 @@ func (p *PlatformAdapterOnebot) convertSealMsgToMessageChain(msg []message.IMess
 			}
 			rawMsg = rawMsg.Append(schema.Message{
 				Type: res.RawType,
-				Data: compatCardTextPayload(res.RawType, res.Data),
+				Data: res.Data,
 			})
 			// 将其转换为CQ码
 			var params []string

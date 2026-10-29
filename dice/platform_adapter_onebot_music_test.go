@@ -31,8 +31,9 @@ func newMusicTestAdapter(t *testing.T) (*PlatformAdapterOnebot, *onebotMusicTest
 }
 
 // TestOnebotMusicCQCodePassThrough 点歌类 CQ 码应作为 music 消息段原样发到协议端。
-// 回归背景：升级核心后 [CQ:music] 变成了 JSON 编码字符串发出去，
-// QQ 客户端渲染为“发送者版本过低，无法展示内容”。
+// 回归背景：升级核心后 [CQ:music] 曾变成 JSON 编码字符串发出去，
+// QQ 客户端渲染为"发送者版本过低，无法展示内容"。
+// 卡片合成/签名是协议端（SnowLuma musicSignUrl 等）的事，核心保持标准透传。
 func TestOnebotMusicCQCodePassThrough(t *testing.T) {
 	pa, mock := newMusicTestAdapter(t)
 
@@ -65,19 +66,14 @@ func TestOnebotMusicCQCodePassThrough(t *testing.T) {
 		if data["title"] != "测试歌曲" {
 			t.Fatalf("music segment lost title: %s", seg.Data)
 		}
-		// text 字段镜像仅限 json/xml 卡片，music 段不应被注入
-		if _, exists := data["text"]; exists {
-			t.Fatalf("music segment unexpectedly gained a text field: %s", seg.Data)
-		}
 		return
 	}
 	t.Fatalf("no music segment in chain: %s", marshaled)
 }
 
-// TestOnebotJsonXmlCQCodePassThrough 同为 DefaultElement 通道的 json/xml 卡片。
-// 兼容要求：载荷按 OneBot 11 标准保留在 "data" 字段，同时镜像到 "text" 字段——
-// 部分 OneBot 实现（如 SnowLuma）只从 "text" 取卡片载荷，缺失时签名失败并降级为
-// 未签名卡片，QQ 端渲染为"发送者版本过低，无法展示内容"。
+// TestOnebotJsonXmlCQCodePassThrough json/xml 卡片段按 OneBot 11 标准把载荷放在
+// "data" 字段。协议端（如 SnowLuma 的 json codec）按标准读取该键；核心不做任何
+// 键名改写或额外注入。
 func TestOnebotJsonXmlCQCodePassThrough(t *testing.T) {
 	pa, mock := newMusicTestAdapter(t)
 
@@ -105,8 +101,8 @@ func TestOnebotJsonXmlCQCodePassThrough(t *testing.T) {
 		if data["data"] != payload {
 			t.Fatalf("json segment lost standard data payload: %s", seg.Data)
 		}
-		if data["text"] != payload {
-			t.Fatalf("json segment missing mirrored text payload: %s", seg.Data)
+		if _, exists := data["text"]; exists {
+			t.Fatalf("json segment unexpectedly gained a text field: %s", seg.Data)
 		}
 	}
 	if !sawJSON {
