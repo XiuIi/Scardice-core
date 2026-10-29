@@ -238,7 +238,8 @@ replace (
 	// Try to fix sqlite in cgofree
 	// github.com/glebarez/sqlite v1.11.0 => github.com/PaienNate/sqlite v0.0.0-20241102151933-067d82f14685
 	github.com/dop251/goja_nodejs v0.0.0-20250409162600-f7acab6894b0 => github.com/PaienNate/goja_nodejs v0.0.0-20250924024212-bac2e5ba5231
-	github.com/lonelyevil/kook v0.0.31 => github.com/sealdice/kook v0.0.3
+	// 内置 fork：修复了重连后旧 heartbeat/listen 协程误杀新连接等导致频繁掉线的问题
+	github.com/lonelyevil/kook v0.0.31 => ./third_party/kook
 	github.com/sacOO7/gowebsocket v0.0.0-20221109081133-70ac927be105 => github.com/fy0/GoWebsocket v0.0.0-20231128163937-aa5c110b25c6
 )
 
