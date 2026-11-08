@@ -3380,8 +3380,9 @@ func newOfficialQQWebhookHandler(pa *PlatformAdapterOfficialQQ, onError func(err
 			AppID:     pa.getAppID().String(),
 			AppSecret: pa.getAppSecret(),
 		},
-		// AckSync 在 handler 返回后 ACK。dispatchOfficialQQEvent 会等待命令
-		// 真正执行完成，因此队列关闭/丢弃/进程崩溃时平台可以重试。
+		// AckSync 在 handler 返回后 ACK。dispatchOfficialQQEvent 等待的是
+		// **分发闭包**；Execute(..., false) 启动的命令 goroutine 不在等待范围内。
+		// 因此这是 at-most-once：ACK 之后进程崩溃会丢事件，命令失败也不会触发重试。
 		AckMode: qqwebhook.AckSync,
 		Deduper: newOfficialQQEventDeduper(10*time.Minute, 8192),
 	}

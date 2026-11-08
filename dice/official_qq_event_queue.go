@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	botevent "github.com/sealdice/botgo/event"
 	"go.uber.org/zap"
 
 	"Scardice-core/logger"
@@ -17,8 +18,9 @@ const maxOfficialQQQueuedEvents = 1024
 type queuedOfficialQQEvent struct {
 	run func()
 	// done 非空时表示调用方在等待该事件执行完成（WS 模式）。
-	// buffered=1，避免 Abandon 与 worker 同时发送时阻塞。
-	done chan bool
+	// 成功为 nil；执行 panic 时是 botgo 的 PanicError，队列关闭/丢弃时是
+	// errOfficialQQEventQueueClosed。buffered=1，避免 Abandon 与 worker 同时发送时阻塞。
+	done chan error
 }
 
 // officialQQEventQueue 用单独的 worker 串行执行事件。
@@ -44,17 +46,19 @@ func (q *officialQQEventQueue) Enqueue(event func()) bool {
 	return q.enqueue(event, nil)
 }
 
-// EnqueueWait 入队并等待事件执行完成。队列在事件执行前被 Abandon，
-// 或事件执行时 panic 被隔离时返回 false。
-func (q *officialQQEventQueue) EnqueueWait(event func()) bool {
-	done := make(chan bool, 1)
+// EnqueueWait 入队并等待事件执行完成。
+// 成功返回 nil；队列在事件执行前被关闭/丢弃时返回 errOfficialQQEventQueueClosed；
+// 事件执行 panic 时返回 botgo 的 PanicError（webhook/WS 会按 panic 语义 ACK 并丢弃，
+// 不会把确定性 panic 当成普通可重试错误反复重试）。
+func (q *officialQQEventQueue) EnqueueWait(event func()) error {
+	done := make(chan error, 1)
 	if !q.enqueue(event, done) {
-		return false
+		return errOfficialQQEventQueueClosed
 	}
 	return <-done
 }
 
-func (q *officialQQEventQueue) enqueue(event func(), done chan bool) bool {
+func (q *officialQQEventQueue) enqueue(event func(), done chan error) bool {
 	if event == nil {
 		return false
 	}
@@ -88,28 +92,29 @@ func (q *officialQQEventQueue) work() {
 		q.executing = true
 		q.mu.Unlock()
 
-		ok := runOfficialQQEvent(event.run)
+		err := runOfficialQQEvent(event.run)
 
 		q.mu.Lock()
 		q.executing = false
 		if event.done != nil {
-			event.done <- ok
+			event.done <- err
 		}
 		q.mu.Unlock()
 	}
 }
 
 // runOfficialQQEvent 隔离单个事件的 panic，避免一个坏插件/坏消息把 worker 带崩。
-// 返回 false 表示事件因 panic 未能正常执行完成，等待者必须把它当作失败。
-func runOfficialQQEvent(event func()) (ok bool) {
+// 返回 nil 表示事件正常执行完成；panic 时返回 botgo 的 PanicError，让上层
+// （webhook/WS）能识别“确定性 panic”并 ACK/丢弃，而不是当普通错误反复重试。
+func runOfficialQQEvent(event func()) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			ok = false
 			zap.S().Named(logger.LogKeyAdapter).Errorf("official qq event panic: %v\n%s", r, debug.Stack())
+			err = botevent.NewPanicError("official qq event", r)
 		}
 	}()
 	event()
-	return true
+	return nil
 }
 
 // Close 停止接收新事件；worker 会继续执行已经入队的事件，然后退出。
@@ -133,7 +138,7 @@ func (q *officialQQEventQueue) Abandon() int {
 	q.mu.Unlock()
 	for _, event := range pending {
 		if event.done != nil {
-			event.done <- false
+			event.done <- errOfficialQQEventQueueClosed
 		}
 	}
 	return len(pending)

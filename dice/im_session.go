@@ -98,13 +98,18 @@ func extNamePlaceholder(name string) *ExtInfo {
 }
 
 type GroupInfo struct {
-	Active    bool                               `jsbind:"active" json:"active" yaml:"active"` // 是否在群内开启 - 过渡为象征意义
-	activeMu  sync.RWMutex                       `json:"-" yaml:"-"`                           // 保护 Active，消息处理与保存/通知协程会并发访问
-	extInitMu sync.Mutex                         `json:"-" yaml:"-"`                           // 延迟初始化锁
-	Players   *SyncMap[string, *GroupPlayerInfo] `json:"-" yaml:"-"`                           // 群员角色数据
+	// Active 不直接暴露给 goja（jsbind:"-"）；JS 侧由 dice_jsvm_group_active.go 中的
+	// Object.prototype 访问器转发到 IsActiveRaw/SetActiveRaw，避免脚本绕过 activeMu。
+	Active    bool                               `jsbind:"-" json:"active" yaml:"active"` // 是否在群内开启 - 过渡为象征意义
+	activeMu  sync.RWMutex                       `json:"-" yaml:"-"`                      // 保护 Active，消息处理与保存/通知协程会并发访问
+	extInitMu sync.Mutex                         `json:"-" yaml:"-"`                      // 延迟初始化锁
+	Players   *SyncMap[string, *GroupPlayerInfo] `json:"-" yaml:"-"`                      // 群员角色数据
 
 	activatedExtList  []*ExtInfo // 当前群开启的扩展列表（私有，通过 Getter 访问，由 MarshalJSON/UnmarshalJSON 处理序列化）
 	InactivatedExtSet StringSet  `json:"inactivatedExtSet" yaml:"inactivatedExtSet,flow"` // 手动关闭或尚未启用的扩展
+	// UserInactivatedExtSet 只记录用户手动关闭的扩展；与 InactivatedExtSet 的区别是
+	// 它不包含“从未自动启用”的扩展，迁移合并时只应尊重用户手动关闭的状态。
+	UserInactivatedExtSet StringSet `json:"userInactivatedExtSet" yaml:"userInactivatedExtSet,flow"`
 
 	GroupID         string                 `jsbind:"groupId"       json:"groupId"      yaml:"groupId"`
 	GuildID         string                 `jsbind:"guildId"       json:"guildId"      yaml:"guildId"`
@@ -335,6 +340,12 @@ func (g *GroupInfo) IsActiveRaw() bool {
 	return g.Active
 }
 
+// IsGroupInfoJS 仅供 JS 绑定层识别 GroupInfo 对象。
+// Active 字段不再直接暴露给 goja，getter/setter 通过 IsActiveRaw/SetActiveRaw 加锁。
+func (g *GroupInfo) IsGroupInfoJS() bool {
+	return g != nil
+}
+
 // SetActiveRaw 更新群组启用标志。Active 会被消息处理与保存/通知协程并发访问。
 func (g *GroupInfo) SetActiveRaw(active bool) {
 	if g == nil {
@@ -377,6 +388,10 @@ func (g *GroupInfo) UnmarshalJSON(data []byte) error {
 	if err := sonic.Unmarshal(data, &refs); err != nil {
 		return err
 	}
+	// 旧数据只有 InactivatedExtSet，无法区分“手动关闭”和“未自动启用”；
+	// 保守地把旧集合全部视为手动关闭，避免升级后迁移合并把用户关闭的扩展重新打开。
+	// UserInactivatedExtSet 非 nil（即使是空集合）表示新格式数据，不做回填。
+	g.backfillUserInactivatedExtSet()
 
 	var list []*ExtInfo
 	for _, ref := range refs.ActivatedExtList {

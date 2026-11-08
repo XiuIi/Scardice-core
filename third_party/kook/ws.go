@@ -40,17 +40,24 @@ func (e *helloStatusError) Error() string {
 	return fmt.Sprintf("expecting status ok, received %d", e.code)
 }
 
-func isPermanentResumeError(err error) bool {
-	var helloErr *helloStatusError
-	if !errors.As(err, &helloErr) {
-		return false
-	}
-	switch helloErr.code {
+func permanentAuthStatusCode(code EventStatusCode) bool {
+	switch code {
 	case EventStatusMissingArgument,
 		EventStatusInvalidToken,
 		EventStatusTokenAuthFailed,
-		EventStatusTokenExpired,
-		EventStatusResumeFailed,
+		EventStatusTokenExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+func permanentResumeStatusCode(code EventStatusCode) bool {
+	if permanentAuthStatusCode(code) {
+		return true
+	}
+	switch code {
+	case EventStatusResumeFailed,
 		EventStatusSessionExpired,
 		EventStatusInvalidSequenceNumber:
 		return true
@@ -59,33 +66,35 @@ func isPermanentResumeError(err error) bool {
 	}
 }
 
+// eventStatusErrorCode 从 HELLO 或 REST 错误中提取 KOOK 状态码。
+// 获取 gateway 失败时错误来自 REST 层，KOOK 使用同一组 401xx 码；
+// 这里同时兼容 *RestError 和值类型 RestError。
+func eventStatusErrorCode(err error) (EventStatusCode, bool) {
+	var helloErr *helloStatusError
+	if errors.As(err, &helloErr) {
+		return helloErr.code, true
+	}
+	var restErr *RestError
+	if errors.As(err, &restErr) {
+		return EventStatusCode(restErr.Code), true
+	}
+	var restValue RestError
+	if errors.As(err, &restValue) {
+		return EventStatusCode(restValue.Code), true
+	}
+	return 0, false
+}
+
+func isPermanentResumeError(err error) bool {
+	code, ok := eventStatusErrorCode(err)
+	return ok && permanentResumeStatusCode(code)
+}
+
 // isPermanentAuthError 只把明确的凭据/握手错误视为不可恢复；
 // 网络抖动、网关 5xx 等仍交给指数退避处理。
 func isPermanentAuthError(err error) bool {
-	var helloErr *helloStatusError
-	if errors.As(err, &helloErr) {
-		switch helloErr.code {
-		case EventStatusMissingArgument,
-			EventStatusInvalidToken,
-			EventStatusTokenAuthFailed,
-			EventStatusTokenExpired:
-			return true
-		default:
-			return false
-		}
-	}
-	// 获取 gateway 失败时错误来自 REST 层，KOOK 使用同一组 401xx 码。
-	var restErr *RestError
-	if errors.As(err, &restErr) {
-		switch EventStatusCode(restErr.Code) {
-		case EventStatusMissingArgument,
-			EventStatusInvalidToken,
-			EventStatusTokenAuthFailed,
-			EventStatusTokenExpired:
-			return true
-		}
-	}
-	return false
+	code, ok := eventStatusErrorCode(err)
+	return ok && permanentAuthStatusCode(code)
 }
 
 // ResumeState 是进程重启后恢复 KOOK 连接所需的最小状态。
@@ -437,7 +446,15 @@ func (s *Session) open(resetClosed bool, resume bool) (err error) {
 	// 服务器可能忽略 resume 参数并直接建立一个全新 session。
 	// 新 session 的 sn 从 1 开始；如果继续沿用旧 sequence，所有新事件都会被当成重复丢弃。
 	sessionChanged := resume && h.SessionID != "" && sessionID != "" && h.SessionID != sessionID
-	if sessionChanged {
+	if resume && sessionID != "" && h.SessionID == "" {
+		// HELLO 成功但缺少 session_id：无法判断服务端是否真的恢复了旧 session。
+		// 保守地按新 session 处理并清空 sn，避免新事件被旧 sequence 当重复丢弃。
+		addCaller(s.Logger.Warn()).
+			Str("old_session_id", sessionID).
+			Msg("resume hello is missing session_id, resetting sn state")
+		s.resetSessionState(false)
+		sessionChanged = true
+	} else if sessionChanged {
 		addCaller(s.Logger.Warn()).
 			Str("old_session_id", sessionID).
 			Str("new_session_id", h.SessionID).
@@ -584,6 +601,12 @@ func (s *Session) onEvent(wsConn *websocket.Conn, messageType int, message []byt
 	}
 
 	if e.Signal == EventSignalResumeAck {
+		var ack EventDataResumeAck
+		if err := json.Unmarshal(e.Data, &ack); err != nil {
+			addCaller(s.Logger.Warn()).Err("err", err).Msg("error unmarshalling resume ack")
+		} else {
+			s.applyResumeAckSessionID(wsConn, ack.SessionID)
+		}
 		addCaller(s.Logger.Info()).Msg("all missing message are sent, received Resume Ack signal")
 		return
 	}
@@ -1327,6 +1350,26 @@ func (s *Session) connectionCurrent(wsConn *websocket.Conn) bool {
 	s.RLock()
 	defer s.RUnlock()
 	return s.wsConn == wsConn
+}
+
+// applyResumeAckSessionID 应用 s=6 RESUME ACK 携带的 session_id。
+// 只在当前连接上生效，避免旧连接的迟到 ACK 覆盖新会话。
+func (s *Session) applyResumeAckSessionID(wsConn *websocket.Conn, sessionID string) {
+	if wsConn == nil || sessionID == "" {
+		return
+	}
+	s.Lock()
+	defer s.Unlock()
+	if s.wsConn != wsConn {
+		return
+	}
+	if s.sessionID != "" && s.sessionID != sessionID {
+		addCaller(s.Logger.Warn()).
+			Str("old_session_id", s.sessionID).
+			Str("new_session_id", sessionID).
+			Msg("resume ack changed session_id")
+	}
+	s.sessionID = sessionID
 }
 
 func (s *Session) waitListening(d time.Duration, listening <-chan interface{}) bool {

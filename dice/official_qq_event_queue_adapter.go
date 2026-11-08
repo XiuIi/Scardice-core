@@ -70,9 +70,12 @@ func (pa *PlatformAdapterOfficialQQ) closeOfficialQQEventQueueInstance(queue *of
 
 // dispatchOfficialQQEvent 是各 handler 的统一入口：
 //   - 队列从未启动（测试/极早期）：就地同步执行，保持兼容；
-//   - Webhook/WS 都入队并等待执行完成：botgo 的 ACK/SeqAfterHandle 只有在
-//     命令真正执行后才算成功，避免先 ACK 再丢事件；
-//   - 入队失败返回错误，让平台重试。
+//   - Webhook/WS 都入队并等待**分发闭包**执行完成；适配器的
+//     Execute(..., false) 会在闭包内启动命令 goroutine，因此队列和
+//     eventExecMu 只保证分发顺序，不保证命令执行顺序，也不是“命令完成后再 ACK”；
+//   - 入队失败返回 errOfficialQQEventQueueClosed，让平台重试；
+//   - handler panic 返回 botgo 的 PanicError，让 webhook/WS 走 panic 分支
+//     （记录堆栈后 ACK/丢弃），避免确定性 panic 被平台反复重试。
 func (pa *PlatformAdapterOfficialQQ) dispatchOfficialQQEvent(event func()) error {
 	pa.eventQueueMu.Lock()
 	queue := pa.eventQueue
@@ -89,17 +92,12 @@ func (pa *PlatformAdapterOfficialQQ) dispatchOfficialQQEvent(event func()) error
 
 	if !accepting {
 		if queue == nil {
-			runOfficialQQEvent(run)
-			return nil
+			return runOfficialQQEvent(run)
 		}
 		return errOfficialQQEventQueueClosed
 	}
 	if queue == nil {
-		runOfficialQQEvent(run)
-		return nil
+		return runOfficialQQEvent(run)
 	}
-	if !queue.EnqueueWait(run) {
-		return errOfficialQQEventQueueClosed
-	}
-	return nil
+	return queue.EnqueueWait(run)
 }

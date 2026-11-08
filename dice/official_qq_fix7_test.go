@@ -90,7 +90,7 @@ func TestOfficialQQEventQueueAbandonReleasesWaiter(t *testing.T) {
 		t.Fatal("first event did not start")
 	}
 
-	result := make(chan bool, 1)
+	result := make(chan error, 1)
 	go func() {
 		result <- q.EnqueueWait(func() {})
 	}()
@@ -98,8 +98,8 @@ func TestOfficialQQEventQueueAbandonReleasesWaiter(t *testing.T) {
 	q.Abandon()
 	close(block)
 	select {
-	case ok := <-result:
-		if ok {
+	case err := <-result:
+		if err == nil {
 			t.Fatal("EnqueueWait returned success for an abandoned event")
 		}
 	case <-time.After(2 * time.Second):

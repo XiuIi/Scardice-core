@@ -281,9 +281,7 @@ func SetBotOnAtGroup(ctx *MsgContext, groupID string) *GroupInfo {
 		if group.DiceIDExistsMap == nil {
 			group.DiceIDExistsMap = new(SyncMap[string, bool])
 		}
-		if group.InactivatedExtSet == nil {
-			group.InactivatedExtSet = StringSet{}
-		}
+		group.ensureInactivatedSet()
 		group.DiceIDActiveMap.Store(ctx.EndPoint.UserID, true)
 		group.SetActiveRaw(true)
 	} else {
@@ -298,16 +296,17 @@ func SetBotOnAtGroup(ctx *MsgContext, groupID string) *GroupInfo {
 			}
 		}
 		group = &GroupInfo{
-			Active:            true,
-			activatedExtList:  extLst,
-			ExtAppliedTime:    session.Parent.ExtUpdateTime, // 标记已初始化
-			InactivatedExtSet: StringSet{},
-			Players:           new(SyncMap[string, *GroupPlayerInfo]),
-			GroupID:           groupID,
-			DiceIDActiveMap:   new(SyncMap[string, bool]),
-			DiceIDExistsMap:   new(SyncMap[string, bool]),
-			CocRuleIndex:      int(session.Parent.Config.DefaultCocRuleIndex),
-			UpdatedAtTime:     time.Now().Unix(),
+			Active:                true,
+			activatedExtList:      extLst,
+			ExtAppliedTime:        session.Parent.ExtUpdateTime, // 标记已初始化
+			InactivatedExtSet:     StringSet{},
+			UserInactivatedExtSet: StringSet{},
+			Players:               new(SyncMap[string, *GroupPlayerInfo]),
+			GroupID:               groupID,
+			DiceIDActiveMap:       new(SyncMap[string, bool]),
+			DiceIDExistsMap:       new(SyncMap[string, bool]),
+			CocRuleIndex:          int(session.Parent.Config.DefaultCocRuleIndex),
+			UpdatedAtTime:         time.Now().Unix(),
 		}
 		session.ServiceAtNew.Store(groupID, group)
 	}

@@ -1888,25 +1888,44 @@ func mergeOfficialQQGroupMemory(target, source *GroupInfo, d *Dice) bool {
 	mergeBool(&target.DiceIDActiveMap, source.DiceIDActiveMap)
 	mergeBool(&target.DiceIDExistsMap, source.DiceIDExistsMap)
 	mergeBool(&target.BotList, source.BotList)
-	if target.InactivatedExtSet == nil {
-		target.InactivatedExtSet = StringSet{}
+	target.backfillUserInactivatedExtSet()
+	target.ensureInactivatedSet()
+	// 旧群已启用的扩展也一并并入新群，避免迁移后扩展被静默关闭。
+	targetExts := target.GetActivatedExtListRaw()
+	sourceExts := source.GetActivatedExtListRaw()
+	seen := make(map[string]struct{}, len(targetExts))
+	for _, ext := range targetExts {
+		if ext != nil {
+			seen[ext.Name] = struct{}{}
+		}
 	}
 	for name, value := range source.InactivatedExtSet {
+		// 目标群已经启用的扩展不能被旧群的 inactive 记录反向标成关闭。
+		if _, active := seen[name]; active {
+			continue
+		}
 		if _, exists := target.InactivatedExtSet[name]; !exists {
 			target.InactivatedExtSet[name] = value
 			changed = true
 		}
 	}
-	// 旧群已启用的扩展也一并并入新群，避免迁移后扩展被静默关闭。
-	targetExts := target.GetActivatedExtListRaw()
-	sourceExts := source.GetActivatedExtListRaw()
-	if len(sourceExts) > 0 {
-		seen := make(map[string]struct{}, len(targetExts))
-		for _, ext := range targetExts {
-			if ext != nil {
-				seen[ext.Name] = struct{}{}
-			}
+	// 只导入旧群的“用户手动关闭”状态。旧数据没有 UserInactivatedExtSet 时
+	// 保守回退到 InactivatedExtSet；新数据里的自动关闭项不会被当成手动关闭。
+	sourceUserInactivated := source.UserInactivatedExtSet
+	if sourceUserInactivated == nil {
+		sourceUserInactivated = source.InactivatedExtSet
+	}
+	for name := range sourceUserInactivated {
+		if _, active := seen[name]; active {
+			continue
 		}
+		if _, exists := target.UserInactivatedExtSet[name]; !exists {
+			target.UserInactivatedExtSet[name] = struct{}{}
+			target.InactivatedExtSet[name] = struct{}{}
+			changed = true
+		}
+	}
+	if len(sourceExts) > 0 {
 		merged := append([]*ExtInfo(nil), targetExts...)
 		extChanged := false
 		for _, ext := range sourceExts {
@@ -1917,8 +1936,9 @@ func mergeOfficialQQGroupMemory(target, source *GroupInfo, d *Dice) bool {
 				continue
 			}
 			// 新群（规范 ID）里用户手动关闭的扩展不能被旧群的启用状态覆盖，
-			// 否则合并后扩展会在用户没有操作的情况下重新生效。
-			if target.IsExtInactivated(ext.Name) {
+			// 否则合并后扩展会在用户没有操作的情况下重新生效。仅“未自动启用”
+			// 的扩展不算用户关闭，旧群的启用状态仍可导入。
+			if target.IsUserInactivated(ext.Name) {
 				continue
 			}
 			seen[ext.Name] = struct{}{}
